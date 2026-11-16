@@ -1,3 +1,7 @@
+[![make.fun bounty](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![Rank](https://make.fun/badge/markdown-render-speed-02/binasalama12/makefun-markdown-render-speed-02-w1/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![Reward](https://make.fun/badge/markdown-render-speed-02/binasalama12/makefun-markdown-render-speed-02-w1/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+
 # markdown-render-speed-02 — w1-r3
 
 A dependency-free ES module (`parse.js`) whose `parse(markdown)` reproduces
