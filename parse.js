@@ -241,7 +241,10 @@ function extAutolink(src, i, prevCh) {
   if ((rest.startsWith('http://') || rest.startsWith('https://') || /^https?:\/\//i.test(rest)) && (i === 0 || isWs(prevCh) || isPunct(prevCh) || true)) {
     m = /^https?:\/\/[^\s<]+/i.exec(rest);
     if (m) {
-      const text = trimAutolink(m[0]);
+      let raw = m[0];
+      const cut = raw.indexOf('](');
+      if (cut !== -1) raw = raw.slice(0, cut + 1);
+      const text = trimAutolink(raw);
       const afterScheme = text.slice(text.indexOf('://') + 3);
       if (afterScheme.length > 0) return { href: text, text, len: text.length };
     }
@@ -526,7 +529,7 @@ function parseInline(src, refs) {
         if (a) {
           if (a.strip) textBuf = textBuf.slice(0, textBuf.length - a.strip);
           flushText();
-          nodes.push({ t: 'link', href: a.href, title: null, kids: [{ t: 'text', s: a.text }] });
+          nodes.push({ t: 'link', href: a.href, title: null, auto: true, kids: [{ t: 'text', s: a.text }] });
           i += a.len; continue;
         }
       }
@@ -546,6 +549,13 @@ function resolveText(nodes) {
   }
 }
 
+function undoAutolinks(nodes) {
+  for (let k = 0; k < nodes.length; k++) {
+    const nd = nodes[k];
+    if (nd.t === 'link' && nd.auto) { nodes[k] = { t: 'text', s: nd.kids.map(x => x.s || '').join('') }; continue; }
+    if (nd.kids) undoAutolinks(nd.kids);
+  }
+}
 function closeBracket(src, i, nodes, brackets, delims, refs) {
   // only the topmost bracket interacts with this ']'
   if (!brackets.length) return null;
@@ -556,12 +566,15 @@ function closeBracket(src, i, nodes, brackets, delims, refs) {
   if (openIdx === -1) { brackets.splice(bi, 1); return null; }
   let p = i + 1;
   let link = null;
-  if (src[p] === '(') {
+  // marked quirk: a label containing a multi-backtick code span plus '_' never forms a link
+  const labelSrcQ = src.slice(br.srcPos + 1, i);
+  const labelBlocked = !br.img && /`{2,}/.test(labelSrcQ) && labelSrcQ.includes('_');
+  if (!labelBlocked && src[p] === '(') {
     const il = parseInlineLink(src, p);
     if (il) link = { href: il.dest, title: il.title, next: il.next };
   }
-  let refFailed = false;
-  if (!link && src[p] === '[') {
+  let refFailed = labelBlocked;
+  if (!link && !labelBlocked && src[p] === '[') {
     const rl = parseRefLabel(src, p);
     if (rl) {
       const label = rl.label === '' ? src.slice(br.srcPos + 1, i) : rl.label;
@@ -584,6 +597,7 @@ function closeBracket(src, i, nodes, brackets, delims, refs) {
   // build link/image node from children between openIdx+1..end
   const kids = nodes.splice(openIdx + 1);
   nodes.splice(openIdx, 1);
+  if (!br.img) undoAutolinks(kids); // marked: extended autolinks do not form inside link text
   // process emphasis among kids using delims within them
   processEmphasis(kids, delims, openIdx);
   const nd = br.img
@@ -688,6 +702,8 @@ function dedent(l, cols, base = 0) {
     } else break;
   }
   const rest = l.slice(i);
+  // a tab surviving in the leading run must be expanded at its absolute column (base+cols)
+  if (cols > 0 && (rest[0] === ' ' || rest[0] === '\t') && /^[ \t]*\t/.test(rest)) return expandLeadingWs(rest, base + cols);
   if (rest[0] === '\t' && (base + cols) % 4 !== 0) return expandLeadingWs(rest, base + cols);
   return rest;
 }
@@ -782,8 +798,10 @@ function parseRefDef(s) {
   if (s[i] !== ':') return null;
   i++;
   i = skipWsInclNl(s, i, false);
+  const dStart = i;
   const d = parseDest(s, i);
   if (!d) return null;
+  const destAngle = s[dStart] === '<';
   i = d.next;
   // optional title: must be separated by whitespace (may include one newline)
   let title = null;
@@ -792,7 +810,7 @@ function parseRefDef(s) {
   while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) { if (s[j] === '\n') { if (sawNl) break; sawNl = true; } sawWs = true; j++; }
   if (sawWs && j < s.length && (s[j] === '"' || s[j] === "'" || s[j] === '(')) {
     const t = parseTitle(s, j);
-    if (t) {
+    if (t && !(s[j] === '(' && !destAngle && /\s/.test(t.title))) { // marked defs: (...) title with spaces only after <dest>
       // after title, rest of line must be blank-ish
       let k = t.next;
       while (k < s.length && (s[k] === ' ' || s[k] === '\t')) k++;
@@ -818,19 +836,25 @@ function skipWsInclNl(s, i, leadOnly) {
 }
 
 function splitTableRow(line) {
-  // split on unescaped pipes not inside code spans; returns trimmed cell strings
+  // split on unescaped pipes; a backtick run only hides pipes if it closes later in the row
   const cells = [];
-  let cur = '', i = 0, codeTicks = 0;
+  let cur = '', i = 0;
   const s = line;
   while (i < s.length) {
     const c = s[i];
     if (c === '\\' && s[i + 1] === '|') { cur += '|'; i += 2; continue; }
     if (c === '`') {
       let l = 0; while (s[i + l] === '`') l++;
-      if (codeTicks === 0) codeTicks = l; else if (codeTicks === l) codeTicks = 0;
+      // look for a closing run of exactly l backticks
+      let j = i + l, closeEnd = -1;
+      while (j < s.length) {
+        if (s[j] === '`') { let l2 = 0; while (s[j + l2] === '`') l2++; if (l2 === l) { closeEnd = j + l2; break; } j += l2; }
+        else j++;
+      }
+      if (closeEnd !== -1) { cur += s.slice(i, closeEnd).replace(/\\\|/g, '|'); i = closeEnd; continue; }
       cur += '`'.repeat(l); i += l; continue;
     }
-    if (c === '|' && codeTicks === 0) { cells.push(cur); cur = ''; i++; continue; }
+    if (c === '|') { cells.push(cur); cur = ''; i++; continue; }
     cur += c; i++;
   }
   cells.push(cur);
@@ -933,7 +957,7 @@ function parseBlocks(lines, refs, tight, ctx) {
         }
         break;
       }
-      parts.push({ k: 'quote', parts: parseBlocks(inner, refs, false) });
+      parts.push({ k: 'quote', parts: parseBlocks(inner, refs, false, ctx ? { inList: ctx.inList, eofNewline: false } : undefined) });
       continue;
     }
     // list
@@ -974,7 +998,7 @@ function parseBlocks(lines, refs, tight, ctx) {
       }
     }
     // paragraph (with possible setext heading / ref defs)
-    const res = parseParagraph(lines, i, refs, tight);
+    const res = parseParagraph(lines, i, refs, tight, ctx && ctx.inList);
     if (res.part) parts.push(res.part);
     i = res.next;
   }
@@ -1101,7 +1125,7 @@ function defsOnly(text) {
   }
   return any && rest.trim() === '';
 }
-function startsBlock(line, refs, paraLines) {
+function startsBlock(line, inList) {
   // does this line interrupt a paragraph?
   const ind = indentCols(line);
   if (ind > 3) return false;
@@ -1114,12 +1138,13 @@ function startsBlock(line, refs, paraLines) {
   const lm = matchListMarker(line);
   if (lm) {
     if (lm.empty) return false;
-    return true; // marked: any list marker (bullet or ordered, any start number) interrupts a paragraph
+    if (lm.bullet) return true;
+    return lm.num === 1 || !!inList; // marked: inside list items, any ordered marker interrupts
   }
   return false;
 }
 
-function parseParagraph(lines, i, refs, tight) {
+function parseParagraph(lines, i, refs, tight, inList) {
   const plines = [];
   let j = i;
   let setext = 0;
@@ -1139,7 +1164,7 @@ function parseParagraph(lines, i, refs, tight) {
         setext = /^=/.test(s) ? 1 : 2; j++; break;
       }
       if (ind <= 3 && HR_RE.test(s)) break;
-      if (startsBlock(l, refs, plines)) break;
+      if (startsBlock(l, inList)) break;
     }
     plines.push(l);
     j++;
@@ -1178,7 +1203,7 @@ function parseList(lines, start, refs) {
   let curHasContent = false;
   let pendingBlank = false; // blank line(s) seen after content
   let nestedDepth = 0; // contentCol of a nested list currently open in cur item (relative, 0 = none)
-  let inFence = false, fenceCh2 = '', fenceLen2 = 0;
+  let inFence = false, fenceCh2 = '', fenceLen2 = 0, fenceContent = 0;
   while (i < lines.length) {
     const l = lines[i];
     if (isBlank(l)) {
@@ -1208,9 +1233,12 @@ function parseList(lines, start, refs) {
       let atTop;
       if (inFence) {
         atTop = false;
+        fenceContent++;
         if (fenceM && fenceM[1][0] === fenceCh2 && fenceM[1].length >= fenceLen2 && fenceM[2].trim() === '') inFence = false;
       } else if (fenceM && !(fenceM[1][0] === '`' && fenceM[2].includes('`'))) {
-        inFence = true; fenceCh2 = fenceM[1][0]; fenceLen2 = fenceM[1].length; atTop = true;
+        inFence = true; fenceCh2 = fenceM[1][0]; fenceLen2 = fenceM[1].length; fenceContent = 0;
+        atTop = !(nestedDepth > 0 && indentCols(ded) >= nestedDepth);
+        if (atTop && indentCols(ded) === 0) nestedDepth = 0;
       } else if (dm && indentCols(ded) === 0) { atTop = nestedDepth === 0; nestedDepth = dm.contentCol; }
       else if (nestedDepth > 0 && indentCols(ded) >= nestedDepth) atTop = false;
       else { nestedDepth = 0; atTop = true; }
@@ -1225,15 +1253,24 @@ function parseList(lines, start, refs) {
       cur = [m.rest];
       curMarker = m;
       curHasContent = m.rest !== '';
-      nestedDepth = 0; inFence = false;
+      nestedDepth = 0; inFence = false; fenceContent = 0;
       { const fm0 = FENCE_RE.exec(stripUpTo3(m.rest)); if (fm0 && !(fm0[1][0] === '`' && fm0[2].includes('`'))) { inFence = true; fenceCh2 = fm0[1][0]; fenceLen2 = fm0[1].length; } }
       items.push(cur);
       pendingBlank = false;
       i++; continue;
     }
     if (m && ind <= 3 && !sameListType(first, m)) break;
+    // fence content line with too little indent: absorbed only if the fence already has content (marked quirk)
+    if (cur && inFence && fenceContent > 0) {
+      const cs = stripUpTo3(l);
+      const cm2 = indentCols(l) <= 3 && FENCE_RE.exec(cs);
+      cur.push(l);
+      if (cm2 && cm2[1][0] === fenceCh2 && cm2[1].length >= fenceLen2 && cm2[2].trim() === '') inFence = false;
+      else fenceContent++;
+      i++; continue;
+    }
     // lazy continuation line for current item's paragraph
-    if (cur && !pendingBlank && canLazy(l)) {
+    if (cur && !pendingBlank && !inFence && canLazy(l)) {
       const ded = dedent(l, Math.min(indentCols(l), cc));
       cur.push(ded.startsWith(LAZY) ? ded : LAZY + ded);
       i++; continue;
@@ -1258,7 +1295,7 @@ function buildItem(itemLines, loose, refs) {
       itemLines[0] = itemLines[0].slice(m[0].length);
     }
   }
-  return { task, parts: parseBlocks(itemLines, refs, !loose) };
+  return { task, parts: parseBlocks(itemLines, refs, !loose, { inList: true, eofNewline: false }) };
 }
 
 export function parse(markdown) {
@@ -1266,6 +1303,6 @@ export function parse(markdown) {
   const lines = src.split('\n');
   if (src.endsWith('\n')) lines.pop();
   const refs = new Map();
-  const parts = parseBlocks(lines, refs, false, { eofNewline: src.endsWith('\n') });
+  const parts = parseBlocks(lines, refs, false, { eofNewline: src.endsWith('\n'), inList: false });
   return renderParts(parts, refs);
 }
