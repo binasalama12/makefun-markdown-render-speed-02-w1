@@ -230,7 +230,12 @@ function extAutolink(src, i, prevCh) {
   if (rest.startsWith('www.') && (i === 0 || isWs(prevCh) || isPunct(prevCh))) {
     m = /^www\.[^\s<]+/.exec(rest);
     if (m) {
-      let text = trimAutolink(m[0]);
+      let raw = m[0];
+      const cutB = raw.indexOf('][');
+      if (cutB !== -1) raw = raw.slice(0, cutB);
+      const cutP = raw.indexOf('](');
+      if (cutP !== -1) raw = raw.slice(0, cutP + 1);
+      let text = trimAutolink(raw);
       if (text.length > 4 && /\.[A-Za-z]{2,}/.test(text.slice(4)) || /^www\.[^\s<]+\.[^\s<]+$/.test(text)) {
         return { href: 'http://' + text, text, len: text.length };
       }
@@ -242,6 +247,8 @@ function extAutolink(src, i, prevCh) {
     m = /^https?:\/\/[^\s<]+/i.exec(rest);
     if (m) {
       let raw = m[0];
+      const cutB = raw.indexOf('][');
+      if (cutB !== -1) raw = raw.slice(0, cutB);
       const cut = raw.indexOf('](');
       if (cut !== -1) raw = raw.slice(0, cut + 1);
       const text = trimAutolink(raw);
@@ -257,7 +264,7 @@ function extAutolink(src, i, prevCh) {
     if (m) {
       let text = m[0];
       const after = src[i + text.length];
-      if (after !== undefined && /[A-Za-z0-9_\-~]/.test(after)) return null; // token continues: not an autolink
+      if (after === '-' || (after === '_' && src[i + text.length + 1] !== '_')) return null; // token continues with - or lone _: not an autolink (gfm-632); '__' (emphasis) does not block
       const domain = text.slice(text.indexOf('@') + 1);
       const lastLabel = domain.slice(domain.lastIndexOf('.') + 1);
       if (lastLabel.includes('_')) return null;
@@ -810,7 +817,7 @@ function parseRefDef(s) {
   while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) { if (s[j] === '\n') { if (sawNl) break; sawNl = true; } sawWs = true; j++; }
   if (sawWs && j < s.length && (s[j] === '"' || s[j] === "'" || s[j] === '(')) {
     const t = parseTitle(s, j);
-    if (t && !(s[j] === '(' && !destAngle && /\s/.test(t.title))) { // marked defs: (...) title with spaces only after <dest>
+    if (t) {
       // after title, rest of line must be blank-ish
       let k = t.next;
       while (k < s.length && (s[k] === ' ' || s[k] === '\t')) k++;
